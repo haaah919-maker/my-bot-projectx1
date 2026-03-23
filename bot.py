@@ -1,27 +1,27 @@
 import asyncio
 import random
 import aiohttp
-import time
+import os
 import nest_asyncio
-from aiohttp_proxy import ProxyConnector
 from playwright.async_api import async_playwright
 
-# تفعيل nest_asyncio للسماح بتشغيل asyncio داخل Colab
+# تفعيل nest_asyncio للعمل في البيئات السحابية
 nest_asyncio.apply()
 
-# --- الإعدادات ---
+# --- الإعدادات الذكية ---
 TARGET = "https://ouo.io/umzOBoU"
 PROXIES_FILE = "proxies.txt"
-CONCURRENT_COUNT = 15  # عدد العمليات المتوازية (يمكنك زيادتها حسب قوة النت)
+# تم تقليل العدد لضمان استقرار الرام (2GB كحد أقصى للسبيس)
+CONCURRENT_COUNT = 3 
+# اسم السبيس للتعريف في التقرير
+SPACE_ID = os.getenv('SPACE_ID', 'Space-Default')
 
-# ----------------- تطوير سحب البروكسيات وفلترتها -----------------
+# ----------------- جلب البروكسيات -----------------
 async def fetch_proxies_fast():
     urls = [
         "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=1000&country=all&ssl=all&anonymity=all",
-        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks4&timeout=1000&country=all",
-        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=1000&country=all",
-        "https://www.proxy-list.download/api/v1/get?type=https",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/shiftytr/proxy-list/master/proxy.txt"
     ]
     
     unique_proxies = set()
@@ -30,63 +30,66 @@ async def fetch_proxies_fast():
             try:
                 async with session.get(url, timeout=10) as resp:
                     text = await resp.text()
-                    lines = text.splitlines()
-                    for p in lines:
+                    for p in text.splitlines():
                         if ":" in p:
-                            p = p.strip()
-                            if "socks4" in url: unique_proxies.add(f"socks4://{p}")
-                            elif "socks5" in url: unique_proxies.add(f"socks5://{p}")
-                            else: unique_proxies.add(f"http://{p}")
+                            unique_proxies.add(f"http://{p.strip()}")
             except:
                 continue
     return list(unique_proxies)
 
-async def auto_update_proxies(proxies_list, file_path):
+async def auto_update_proxies(proxies_list):
     while True:
-        print(f"\n[Auto-Proxy] 🔄 جاري تحديث البروكسيات من {len(proxies_list)} حالياً...", flush=True)
-        new_raw_list = await fetch_proxies_fast()
-        if new_raw_list:
+        print(f"[{SPACE_ID}] 🔄 جاري تحديث قائمة البروكسيات...")
+        new_list = await fetch_proxies_fast()
+        if new_list:
             proxies_list.clear()
-            proxies_list.extend(new_raw_list)
-            with open(file_path, "w") as f:
-                f.write("\n".join(new_raw_list))
-            print(f"[Auto-Proxy] ✅ تم تحديث القائمة إلى {len(proxies_list)} بروكسي!", flush=True)
+            proxies_list.extend(new_list)
+            print(f"[{SPACE_ID}] ✅ تم جلب {len(proxies_list)} بروكسي.")
         await asyncio.sleep(600) # تحديث كل 10 دقائق
 
-# ----------------- وظائف الأتمتة والضغط -----------------
+# ----------------- فلترة الموارد لتوفير الرام -----------------
 async def block_resources(route):
-    if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
+    # منع الصور، الخطوط، التنسيقات، والإعلانات لتقليل استهلاك المعالج والرام
+    bad_types = ["image", "media", "font", "stylesheet", "other"]
+    bad_urls = ["google-analytics", "doubleclick", "adsbygoogle", "facebook"]
+    
+    if route.request.resource_type in bad_types or any(x in route.request.url for x in bad_urls):
         await route.abort()
     else:
         await route.continue_()
 
+# ----------------- دورة الضغط -----------------
 async def attack_cycle(browser, proxy_url, sem):
     async with sem:
         context = None
         try:
-            # تهيئة المتصفح مع البروكسي وإعدادات Colab
+            # إعدادات التخفي وتقليل الموارد
             context = await browser.new_context(
                 proxy={"server": proxy_url},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                ignore_https_errors=True
+                viewport={'width': 800, 'height': 600} # تصغير الشاشة يوفر رام
             )
             page = await context.new_page()
+            # تطبيق فلتر الموارد
             await page.route("**/*", block_resources)
 
-            print(f"[Bot] 🚀 محاولة دخول: {proxy_url[-20:]}", flush=True)
-            # تقليل التايم أوت لضمان عدم تعليق العملية ببروكسي بطيء
-            await page.goto(TARGET, timeout=45000, wait_until="domcontentloaded")
+            print(f"[{SPACE_ID}] 🚀 دخول عبر: {proxy_url[-15:]}")
             
+            # محاولة الدخول مع تايم أوت معقول
+            await page.goto(TARGET, timeout=60000, wait_until="domcontentloaded")
+            
+            # تنفيذ الضغطات (تعديل حسب زر الموقع)
             for click_num in [1, 2]:
                 btn = page.locator("#btn-main")
-                await btn.wait_for(state="visible", timeout=10000)
-                await asyncio.sleep(1)
+                await btn.wait_for(state="visible", timeout=15000)
+                await asyncio.sleep(random.uniform(1, 3)) # محاكاة بشرية
                 await btn.click(force=True)
-                print(f"[Bot] ✅ ضغطة ({click_num}/2) ناجحة", flush=True)
+                print(f"[{SPACE_ID}] ✅ ضغطة {click_num} ناجحة.")
                 await asyncio.sleep(2)
                 
-        except Exception:
-            pass # تجاهل أخطاء البروكسيات الميتة
+        except Exception as e:
+            # أخطاء البروكسي طبيعية، نتجاهلها للاستمرار
+            pass 
         finally:
             if context:
                 await context.close()
@@ -98,34 +101,35 @@ async def worker_loop(browser, proxies_list, sem):
             continue
         proxy_url = random.choice(proxies_list)
         await attack_cycle(browser, proxy_url, sem)
-        await asyncio.sleep(random.uniform(1, 3))
+        # استراحة قصيرة بين الدورات لعدم حرق المعالج
+        await asyncio.sleep(random.uniform(2, 5))
 
 async def main():
     proxies = []
-    # تشغيل تحديث البروكسيات في الخلفية
-    asyncio.create_task(auto_update_proxies(proxies, PROXIES_FILE))
+    asyncio.create_task(auto_update_proxies(proxies))
 
-    # انتظار أول دفعة بروكسيات لتبدأ العمليات
-    print("⏳ بانتظار جلب أول قائمة بروكسيات...")
     while not proxies:
         await asyncio.sleep(2)
 
-    print(f"🔥 تم بدء البوت بـ {CONCURRENT_COUNT} عمليات متوازية...")
-    
     async with async_playwright() as playwright:
-        # إعدادات خاصة بـ Colab لضمان استقرار Chromium
+        # إعدادات الانطلاق الصامتة والأكثر خفة
         browser = await playwright.chromium.launch(
             headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            args=[
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process', # تشغيل كل شيء في عملية واحدة لتوفير الرام
+                '--no-zygote'
+            ]
         )
         
         sem = asyncio.Semaphore(CONCURRENT_COUNT)
         tasks = [asyncio.create_task(worker_loop(browser, proxies, sem)) for _ in range(CONCURRENT_COUNT)]
         
+        print(f"[{SPACE_ID}] 🔥 البوت شغال الآن بـ {CONCURRENT_COUNT} عمال...")
         await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🛑 تم إيقاف البوت بواسطة المستخدم.")
+    asyncio.run(main())
